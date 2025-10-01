@@ -48,7 +48,7 @@ class BeamTNOracle:
         )
         
         self.compress_optimizer = ctg.ReusableHyperCompressedOptimizer(
-            chi=256,
+            chi=200,
             parallel=64,
             optlib="optuna",
             max_time="rate:1e8",
@@ -258,6 +258,7 @@ class CustomPeakSolver:
                     prefix = prefix + sub_bitstring[:6]
                     new_prefix_dict = {i: int(b) for i, b in enumerate(prefix)}
                     p, sub_bitstring = oracle.full_compress_state_vector(new_prefix_dict)
+                
                 p = max(p, LOG_FLOOR)
                 
                 complete_bitstring = prefix + sub_bitstring
@@ -280,22 +281,18 @@ class CustomPeakSolver:
             qc = QuantumCircuit.from_qasm_str(qasm)
             n = qc.num_qubits
             if n > 36:
-                cut_position = n-32
+                cut_position = n-33
             else:
                 cut_position = 5
             try:
                 overall_start = time.perf_counter()
-
                 beam_tn_oracle = BeamTNOracle(qc)
-                
-                candidates = self.beam_search(beam_tn_oracle, cut_position=cut_position)
-                
+                candidates = self.beam_search(beam_tn_oracle, cut_position=cut_position)                
                 if not candidates:
                     print("No candidates found, returning empty string")
                     return ""
-                
                 candidate_bslist = [bs for (bs, lp) in candidates]
-                bitstring, p = beam_tn_oracle.verify_candidates_exact(candidate_bslist[:20])
+                bitstring, p = beam_tn_oracle.verify_candidates_exact(candidate_bslist[:30])
                 
                 print(f"Best bitstring: {bitstring} with probability {p:.6e}")
                 overall_end = time.perf_counter()
