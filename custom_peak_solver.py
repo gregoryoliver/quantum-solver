@@ -121,7 +121,7 @@ class BeamTNOracle:
         tn = self.psi
         tn = tn.hyperinds_resolve(mode="tree")
         n = len(tn.outer_inds())
-        remaining = [i for i in range(n) if i not in prefix]
+        remaining = [i for i in range(n-1) if i not in prefix]
         r = len(remaining)
         
         def ensure_cupy(tn):
@@ -140,6 +140,12 @@ class BeamTNOracle:
             arr = cp.asarray(vec) if use_cupy else vec
             tnc |= qtn.Tensor(arr, inds=(out_inds[q],))
 
+        for i in range(n-1, n):
+            last_idx = out_inds[i]
+            sum_vec = np.array([1 + 0j, 1 + 0j], dtype=np.complex64)
+            sum_arr = cp.asarray(sum_vec) if use_cupy else sum_vec
+            tnc |= qtn.Tensor(sum_arr, inds=(last_idx,))
+        
         remaining_out_inds = [out_inds[q] for q in remaining]
         if use_cupy:
             backend_ctx = qtn.contract_backend('cupy')
@@ -169,38 +175,40 @@ class BeamTNOracle:
         best_p = -1.0
         best_str = ""
         print(f"candidate: {candidates}")
-        for bitstr in candidates:
-            try:
-                prefix = {i: int(bit) for i, bit in enumerate(bitstr)}
-                out_inds = sorted(self.psi.outer_inds(), key=lambda x: int(x[1:]))
-                tnc = self.psi.copy()
-                for q, bit in prefix.items():
-                    vec = np.array([1, 0], dtype=np.complex64) if bit == 0 else np.array([0, 1], dtype=np.complex64)
-                    arr = cp.asarray(vec)
-                    tnc |= qtn.Tensor(arr, inds=(out_inds[q],))
-                
-                with qtn.contract_backend('cupy'):
-                    amp = tnc.contract(optimize=self.optimizer, output_inds=[])
-                
-                if hasattr(amp, 'get'):
-                    amp = cp.asnumpy(amp)
-                p = float(abs(complex(amp)) ** 2)
-                print(f"bitstr: {bitstr} -> {p}")
-                if p > best_p:
-                    best_p = p
-                    best_str = bitstr
-                
-                # FEATURE: Explicit GPU memory freeing to prevent leaking
-                del amp, tnc
-                cp.get_default_memory_pool().free_all_blocks()
-                gc.collect()
+        for candidate in candidates:
+            for last_bit in ['0', '1']:
+                bitstr = candidate + last_bit
+                try:
+                    prefix = {i: int(bit) for i, bit in enumerate(bitstr)}
+                    out_inds = sorted(self.psi.outer_inds(), key=lambda x: int(x[1:]))
+                    tnc = self.psi.copy()
+                    for q, bit in prefix.items():
+                        vec = np.array([1, 0], dtype=np.complex64) if bit == 0 else np.array([0, 1], dtype=np.complex64)
+                        arr = cp.asarray(vec)
+                        tnc |= qtn.Tensor(arr, inds=(out_inds[q],))
                     
-            except Exception as e:
-                print(f"Error verifying candidate {bitstr}: {e}")
-                # FEATURE: Explicit GPU memory freeing to prevent leaking
-                cp.get_default_memory_pool().free_all_blocks()
-                gc.collect()
-                continue
+                    with qtn.contract_backend('cupy'):
+                        amp = tnc.contract(optimize=self.optimizer, output_inds=[])
+                    
+                    if hasattr(amp, 'get'):
+                        amp = cp.asnumpy(amp)
+                    p = float(abs(complex(amp)) ** 2)
+                    print(f"bitstr: {bitstr} -> {p}")
+                    if p > best_p:
+                        best_p = p
+                        best_str = bitstr
+                    
+                    # FEATURE: Explicit GPU memory freeing to prevent leaking
+                    del amp, tnc
+                    cp.get_default_memory_pool().free_all_blocks()
+                    gc.collect()
+                        
+                except Exception as e:
+                    print(f"Error verifying candidate {bitstr}: {e}")
+                    # FEATURE: Explicit GPU memory freeing to prevent leaking
+                    cp.get_default_memory_pool().free_all_blocks()
+                    gc.collect()
+                    continue
 
         return best_str, best_p
 
@@ -284,7 +292,7 @@ class CustomPeakSolver:
                     partial_beam.append((math.log(p), prefix))
                     print(f"prefix: {prefix} and sub_bitstring: {sub_bitstring}")
                 except Exception as e:
-                    beam.append((math.log(p), prefix))
+                    partial_beam.append((math.log(p), prefix))
             
             partial_beam = heapq.nlargest(len(partial_beam), partial_beam, key=lambda x: x[0])
             
