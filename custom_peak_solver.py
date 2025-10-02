@@ -5,7 +5,6 @@ import time
 import gc
 from itertools import product
 
-import bittensor as bt
 from qiskit import QuantumCircuit
 from qiskit.qasm2 import dumps
 import quimb.tensor as qtn
@@ -41,7 +40,7 @@ class BeamTNOracle:
             parallel=64,
             optlib="optuna",
             max_time="rate:1e8",
-            max_repeats=400,
+            max_repeats=450,
             directory=True,
             progbar=True,
             methods=['greedy-compressed', 'kahypar-agglom'],
@@ -52,7 +51,7 @@ class BeamTNOracle:
             parallel=64,
             optlib="optuna",
             max_time="rate:1e8",
-            max_repeats=400,
+            max_repeats=450,
             directory=True,
             progbar=True,
             methods=['greedy-compressed', 'kahypar-agglom'],
@@ -67,7 +66,7 @@ class BeamTNOracle:
         
         tn = self.psi.hyperinds_resolve(mode="tree")
         n = len(tn.outer_inds())
-        remaining = [i for i in range(n-4) if i not in prefix]
+        remaining = [i for i in range(n-7) if i not in prefix]
         r = len(remaining)
         
         def ensure_cupy(tn):
@@ -86,7 +85,7 @@ class BeamTNOracle:
             arr = cp.asarray(vec) if use_cupy else vec
             tnc |= qtn.Tensor(arr, inds=(out_inds[q],))
         
-        for i in range(n-4, n):
+        for i in range(n-7, n):
             last_idx = out_inds[i]
             sum_vec = np.array([1 + 0j, 1 + 0j], dtype=np.complex64)
             sum_arr = cp.asarray(sum_vec) if use_cupy else sum_vec
@@ -242,30 +241,67 @@ class CustomPeakSolver:
         n = oracle.n
         print(f"Starting beam search with cut at position {cut_position} on {n}-qubit circuit")
         beam: List[Tuple[float, str]] = []
+        partial_beam: List[Tuple[float, str]] = []
         t0 = time.perf_counter()
         k=0
-        for prefix_bits in product('01', repeat=cut_position):
-            prefix = ''.join(prefix_bits)
-            prefix_dict = {i: int(b) for i, b in enumerate(prefix)}
-            k += 1
-            p = LOG_FLOOR
-            sub_bitstring = ''
-            try:
-                if n < 36:
+        if n < 36:
+            for prefix_bits in product('01', repeat=cut_position):
+                prefix = ''.join(prefix_bits)
+                prefix_dict = {i: int(b) for i, b in enumerate(prefix)}
+                k += 1
+                p = LOG_FLOOR
+                sub_bitstring = ''
+                try:
                     p, sub_bitstring = oracle.full_compress_state_vector(prefix_dict)
+                    p = max(p, LOG_FLOOR)
+                    
+                    complete_bitstring = prefix + sub_bitstring
+                    beam.append((math.log(p), complete_bitstring))
+                    print(f"{prefix} + {sub_bitstring} -> {math.log(p)} _{k}")
+                            
+                except Exception as e:
+                    beam.append((math.log(p), prefix))
+        else:
+            try:
+                if cut_position == 4:
+                    prefix = '0000'
                 else:
-                    p, sub_bitstring = oracle.compress_state_vector(prefix_dict)
-                    prefix = prefix + sub_bitstring[:6]
-                    new_prefix_dict = {i: int(b) for i, b in enumerate(prefix)}
-                    p, sub_bitstring = oracle.full_compress_state_vector(new_prefix_dict)
-                p = max(p, LOG_FLOOR)
-                
-                complete_bitstring = prefix + sub_bitstring
-                beam.append((math.log(p), complete_bitstring))
-                print(f"{prefix} + {sub_bitstring} -> {math.log(p)} _{k}")
-                         
+                    prefix = '000'
+                prefix_dict = {i: int(b) for i, b in enumerate(prefix)} 
+                p, sub_bitstring = oracle.compress_state_vector(prefix_dict)
             except Exception as e:
-                beam.append((math.log(p), prefix))
+                print(f"memory overflow in 5 prefix: {e}")
+                cut_position = 4
+            for prefix_bits in product('01', repeat=cut_position):
+                prefix = ''.join(prefix_bits)
+                prefix_dict = {i: int(b) for i, b in enumerate(prefix)}
+                p = LOG_FLOOR
+                sub_bitstring = ''
+                try:
+                    p, sub_bitstring = oracle.compress_state_vector(prefix_dict)
+                    prefix = prefix + sub_bitstring[:7]
+                    p = max(p, LOG_FLOOR)
+                    partial_beam.append((math.log(p), prefix))
+                    print(f"prefix: {prefix} and sub_bitstring: {sub_bitstring}")
+                except Exception as e:
+                    beam.append((math.log(p), prefix))
+            
+            partial_beam = heapq.nlargest(len(partial_beam), partial_beam, key=lambda x: x[0])
+            
+            for p, prefix in partial_beam:
+                prefix_dict = {i: int(b) for i, b in enumerate(prefix)}
+                k += 1
+                p = LOG_FLOOR
+                sub_bitstring = ''
+                try:
+                    p, sub_bitstring = oracle.full_compress_state_vector(prefix_dict)
+                    p = max(p, LOG_FLOOR)
+                    complete_bitstring = prefix + sub_bitstring
+                    beam.append((math.log(p), complete_bitstring))
+                    print(f"{prefix} + {sub_bitstring} -> {math.log(p)} _{k}")
+                            
+                except Exception as e:
+                    beam.append((math.log(p), prefix))
                 
         beam = heapq.nlargest(len(beam), beam, key=lambda x: x[0])
   
@@ -279,24 +315,29 @@ class CustomPeakSolver:
         try:
             qc = QuantumCircuit.from_qasm_str(qasm)
             n = qc.num_qubits
-            if n > 36:
-                cut_position = n-32
-            else:
-                cut_position = 5
+            # if n > 36:
+            #     cut_position = n-34
+            # else:
+            #     cut_position = 5
+            cut_position = 3
             try:
                 overall_start = time.perf_counter()
-
                 beam_tn_oracle = BeamTNOracle(qc)
-                
-                candidates = self.beam_search(beam_tn_oracle, cut_position=cut_position)
-                
+                candidates = self.beam_search(beam_tn_oracle, cut_position=cut_position)                
                 if not candidates:
                     print("No candidates found, returning empty string")
                     return ""
-                
                 candidate_bslist = [bs for (bs, lp) in candidates]
-                bitstring, p = beam_tn_oracle.verify_candidates_exact(candidate_bslist[:20])
-                
+                bitstring, p = beam_tn_oracle.verify_candidates_exact(candidate_bslist[:5])
+                if p < 1e-10:
+                    cut_position = 4
+                    candidates = self.beam_search(beam_tn_oracle, cut_position=cut_position)                
+                    if not candidates:
+                        print("No candidates found, returning empty string")
+                        return ""
+                    candidate_bslist = [bs for (bs, lp) in candidates]
+                    bitstring, p = beam_tn_oracle.verify_candidates_exact(candidate_bslist[:5])
+                    
                 print(f"Best bitstring: {bitstring} with probability {p:.6e}")
                 overall_end = time.perf_counter()
                 print(f"Overall process took {self.format_time(overall_end - overall_start)}.")
